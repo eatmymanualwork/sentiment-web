@@ -20,6 +20,64 @@ st.title("📊 Sentiment Dashboard — Retail vs Institutions")
 st.caption("Retail: Myfxbook (kontrariańsko). Institutions: COT (Leveraged Funds). NetScore = 0.6*Retail + 0.4*Institutions.")
 
 # -------------------- NARZĘDZIA --------------------
+def load_cot_history(url: str) -> pd.DataFrame:
+    """
+    Wczytuje CSV z historią COT w formacie:
+      date,symbol,lev_funds_net
+    gdzie:
+      - date: YYYY-MM-DD (tydzień raportu),
+      - symbol: np. EURUSD, GBPUSD, AUDUSD, US500, US2000,
+      - lev_funds_net: pozycja netto 'Leveraged Funds'.
+    Zwraca DataFrame z kolumnami ['date','symbol','lev_funds_net'].
+    """
+    if not url:
+        return pd.DataFrame(columns=["date", "symbol", "lev_funds_net"])
+    try:
+        r = requests.get(url, timeout=20)
+        r.raise_for_status()
+        df = pd.read_csv(io.StringIO(r.text))
+        needed = {"date", "symbol", "lev_funds_net"}
+        if not needed.issubset(df.columns):
+            return pd.DataFrame(columns=["date", "symbol", "lev_funds_net"])
+        # upewnij się, że 'date' jest datą (bez czasu)
+        df["date"] = pd.to_datetime(df["date"]).dt.date
+        # porządek: rosnąco po dacie
+        df = df.sort_values(["symbol", "date"]).reset_index(drop=True)
+        return df
+    except Exception:
+        return pd.DataFrame(columns=["date", "symbol", "lev_funds_net"])
+
+
+def institutional_score_from_history(cot_hist: pd.DataFrame, sym: str) -> float:
+    """
+    Liczy InstitutionalScore jako z‑score **tygodniowej zmiany** 'lev_funds_net'
+    w oknie bazowym ~13 tygodni, zmapowany logistycznie do zakresu [-100, 100].
+
+    Jeżeli mamy zbyt krótką historię lub wariancja = 0 → zwraca 0 (neutral).
+    """
+    if cot_hist is None or cot_hist.empty:
+        return 0.0
+    ser = cot_hist.loc[cot_hist["symbol"] == sym, "lev_funds_net"].astype(float).sort_index()
+    if len(ser) < 6:
+        return 0.0
+
+    delta = ser.diff()  # zmiana tydzień/tydzień
+    # baseline 13-tyg (fallback: cała seria, jeśli krótsza)
+    mu = delta.rolling(13).mean().iloc[-1] if len(delta) >= 13 else delta.mean()
+    sigma = delta.rolling(13).std().iloc[-1] if len(delta) >= 13 else delta.std(ddof=0)
+
+    if sigma == 0 or pd.isna(sigma):
+        return 0.0
+
+    z = float((delta.iloc[-1] - mu) / sigma)
+    # mapowanie logistyczne do [-100, 100]
+    scaled = 100.0 * (2.0 / (1.0 + math.exp(-z)) - 1.0)
+    # przytnij do zakresu
+    return max(-100.0, min(100.0, scaled))
+
+
+
+
 def clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
 
