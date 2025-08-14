@@ -1,0 +1,24 @@
+name: Build COT history
+
+on:
+  schedule:
+    - cron: "20 19 * * FRI"   # piątek 19:20 UTC (~21:20 PL) po publikacji CFTC
+  workflow_dispatch: {}        # pozwala uruchomić ręcznie
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Install deps
+        run: python -m pip install requests pandas
+      - name: Fetch and update cot_history.csv
+        run: python cot_fetch.py
+      - name: Commit updated history
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Update COT history"
+          file_pattern: cot_history.csv
