@@ -5,7 +5,7 @@ import pandas as pd
 URL = "https://www.cftc.gov/dea/newcot/FinFutWk.txt"
 OUT = "cot_history.csv"
 
-# mapowanie CFTC -> nasz symbol
+# CFTC market -> nasz symbol
 MAP = {
     "EURO FX": "EURUSD",
     "BRITISH POUND STERLING": "GBPUSD",
@@ -15,37 +15,56 @@ MAP = {
 }
 
 def parse_weekly(txt: str) -> pd.DataFrame:
-    """Zwraca DF z kolumnami ['date','symbol','lev_funds_net'] (nawet gdy pusty)."""
+    """
+    Zwraca DF z kolumnami ['date','symbol','lev_funds_net'].
+    Parser szuka bloków rynku oraz wierszy z 'Leveraged Funds'.
+    Wyciąga liczby z tej linii i liczy net = long - short.
+    """
     lines = txt.splitlines()
-    # spróbuj wyczytać datę tygodnia z nagłówka
+
+    # Data tygodnia (spróbuj z nagłówka; fallback: ostatni wtorek)
     week_date = None
-    date_re = re.compile(r"(\d{2}/\d{2}/\d{2})")
-    for L in lines[:15]:
-        m = date_re.search(L)
+    for L in lines[:20]:
+        m = re.search(r"(\d{2})/(\d{2})/(\d{2})", L)
         if m:
-            mm, dd, yy = m.group(1).split("/")
+            mm, dd, yy = m.groups()
             week_date = f"20{yy}-{mm}-{dd}"
             break
-    if week_date is None:
-      # fallback: ostatni wtorek (stan raportu)
+    if not week_date:
         today = dt.date.today()
         week_date = (today - dt.timedelta(days=(today.weekday() - 1) % 7)).isoformat()
 
     current = None
     out = []
-    for line in lines:
-        up = line.strip().upper()
+
+    for raw in lines:
+        up = raw.strip().upper()
+
+        # wykryj początek bloku rynku
         for mk, sym in MAP.items():
             if up.startswith(mk):
                 current = sym
-        if current and "LEV FUNDS" in up and "NET" in up:
-            parts = [p for p in up.replace(",", " ").split() if p.replace("-", "").isdigit()]
-            if parts:
-                net = int(parts[-1])
-                out.append({"date": week_date, "symbol": current, "lev_funds_net": net})
-                current = None
 
-    # ważne: nawet gdy brak danych – zwróć DF z kolumnami
+        # jeśli jesteśmy w bloku i trafimy wiersz Leveraged Funds – spróbuj wyciągnąć long/short
+        if current and ("LEVERAGED FUNDS" in up or "LEV FUNDS" in up):
+            # wszystkie liczby całkowite (z ewentualnymi przecinkami i minusami)
+            nums = re.findall(r"-?\d[\d,]*", up)
+            nums = [int(n.replace(",", "")) for n in nums]
+            # typowy układ: Long, Short, Spreading, ..., Net ; ale bywa różnie.
+            # Dlatego liczmy net = long - short gdy są min. 2 liczby.
+            net = None
+            if len(nums) >= 2:
+                net = nums[0] - nums[1]
+            # jeśli jest sporo liczb, ostatnia bywa "Net" – możemy użyć jako fallback
+            if net is None and len(nums) >= 1:
+                net = nums[-1]
+
+            if net is not None:
+                out.append({"date": week_date, "symbol": current, "lev_funds_net": int(net)})
+
+            current = None  # zamykamy blok rynku
+
+    # zwróć DF z kolumnami nawet, gdy pusto
     return pd.DataFrame(out, columns=["date", "symbol", "lev_funds_net"])
 
 def main():
@@ -54,12 +73,13 @@ def main():
     df_new = parse_weekly(r.text)
 
     if os.path.exists(OUT):
-        df_old = pd.read_csv(OUT)  # może być puste, ale z kolumnami
+        try:
+            df_old = pd.read_csv(OUT)
+        except Exception:
+            df_old = pd.DataFrame(columns=["date", "symbol", "lev_funds_net"])
     else:
-        # utwórz pusty DF z poprawnymi kolumnami
         df_old = pd.DataFrame(columns=["date", "symbol", "lev_funds_net"])
 
-    # sklej i odfiltruj duplikaty; jeśli oba puste – dalej będzie pusty, ale z kolumnami
     df = pd.concat([df_old, df_new], ignore_index=True)
     if not df.empty:
         df["date"] = pd.to_datetime(df["date"]).dt.date
@@ -70,3 +90,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
