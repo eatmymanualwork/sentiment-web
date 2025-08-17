@@ -5,6 +5,10 @@ on:
     - cron: "20 19 * * FRI"   # piątek 19:20 UTC (~21:20 PL) po publikacji CFTC
   workflow_dispatch: {}        # pozwala uruchomić ręcznie
 
+  permissions:
+  contents: write
+
+
 jobs:
   build:
     runs-on: ubuntu-latest
