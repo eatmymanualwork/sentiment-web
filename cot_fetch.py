@@ -1,11 +1,15 @@
-import os, re, datetime as dt
+import os
+import re
+import datetime as dt
 import requests
 import pandas as pd
 
+# Adres tygodniowego raportu CFTC
 URL = "https://www.cftc.gov/dea/newcot/FinFutWk.txt"
+# Nazwa pliku wyjściowego z historią
 OUT = "cot_history.csv"
 
-# CFTC market -> symbol
+# Mapowanie nazw rynków CFTC -> symbol instrumentu
 MAP = {
     "EURO FX": "EURUSD",
     "BRITISH POUND STERLING": "GBPUSD",
@@ -15,8 +19,12 @@ MAP = {
 }
 
 def parse_weekly(txt: str) -> pd.DataFrame:
+    """
+    Parsuje treść raportu FinFutWk.txt i zwraca DataFrame z kolumnami
+    ['date', 'symbol', 'lev_funds_net'].
+    """
     lines = txt.splitlines()
-    # Ustal datę z nagłówka mm/dd/yy; fallback: ostatni wtorek
+    # Określ datę raportu (np. 08/06/24) z pierwszych kilkunastu linii
     week_date = None
     for L in lines[:20]:
         m = re.search(r"(\d{2})/(\d{2})/(\d{2})", L)
@@ -25,48 +33,58 @@ def parse_weekly(txt: str) -> pd.DataFrame:
             week_date = f"20{yy}-{mm}-{dd}"
             break
     if not week_date:
+        # Fallback: użyj ostatniego wtorku
         today = dt.date.today()
         week_date = (today - dt.timedelta(days=(today.weekday() - 1) % 7)).isoformat()
 
-    current = None
-    out = []
+    current_market = None
+    records = []
     for raw in lines:
         up = raw.strip().upper()
-        # rozpoznaj rynek
+        # Wykryj początek bloku rynku
         for mk, sym in MAP.items():
             if up.startswith(mk):
-                current = sym
-        # znajdź wiersz Leveraged Funds
-        if current and ("LEVERAGED FUNDS" in up or "LEV FUNDS" in up):
+                current_market = sym
+        # Szukaj wiersza z danymi "Leveraged Funds" (lub skrótu "Lev Funds")
+        if current_market and ("LEVERAGED FUNDS" in up or "LEV FUNDS" in up):
+            # Wyciągnij wszystkie liczby (mogą mieć przecinki i minusy)
             nums = [int(n.replace(",", "")) for n in re.findall(r"-?\d[\d,]*", up)]
-            # net = long - short (pierwsze dwie liczby); fallback: ostatnia liczba w linii
-            net = nums[0] - nums[1] if len(nums) >= 2 else nums[-1] if nums else None
+            # Netto = long – short, jeśli mamy ≥2 liczby; w przeciwnym razie weź ostatnią liczbę
+            net = None
+            if len(nums) >= 2:
+                net = nums[0] - nums[1]
+            elif nums:
+                net = nums[-1]
             if net is not None:
-                out.append({"date": week_date, "symbol": current, "lev_funds_net": int(net)})
-            current = None
-    return pd.DataFrame(out, columns=["date", "symbol", "lev_funds_net"])
+                records.append({
+                    "date": week_date,
+                    "symbol": current_market,
+                    "lev_funds_net": int(net)
+                })
+            current_market = None  # Zamknij blok rynku
+    # Zwróć DataFrame z kolumnami nawet gdy brak wierszy
+    return pd.DataFrame(records, columns=["date", "symbol", "lev_funds_net"])
 
 def main():
-    resp = requests.get(URL, timeout=40)
+    # Pobierz treść pliku z nagłówkiem User-Agent (inaczej może być 403)
+    resp = requests.get(URL, headers={"User-Agent": "Mozilla/5.0"}, timeout=40)
     resp.raise_for_status()
     df_new = parse_weekly(resp.text)
-
-    df_old = pd.DataFrame(columns=["date","symbol","lev_funds_net"])
+    # Wczytaj istniejący plik historii (jeśli istnieje)
     if os.path.exists(OUT):
         try:
             df_old = pd.read_csv(OUT)
         except Exception:
-            pass
-
+            df_old = pd.DataFrame(columns=["date", "symbol", "lev_funds_net"])
+    else:
+        df_old = pd.DataFrame(columns=["date", "symbol", "lev_funds_net"])
+    # Sklej starą i nową historię, usuń duplikaty, posortuj
     df = pd.concat([df_old, df_new], ignore_index=True)
     if not df.empty:
         df["date"] = pd.to_datetime(df["date"]).dt.date
-        df = df.drop_duplicates(subset=["date","symbol"]).sort_values(["symbol","date"])
+        df = df.drop_duplicates(subset=["date", "symbol"]).sort_values(["symbol", "date"])
     df.to_csv(OUT, index=False)
     print(f"Saved {OUT} rows: {len(df)}")
 
 if __name__ == "__main__":
     main()
-
-
-
