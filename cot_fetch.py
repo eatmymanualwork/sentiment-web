@@ -1,15 +1,20 @@
 import os
-import re
-import datetime as dt
+import io
 import requests
 import pandas as pd
+from datetime import datetime, timezone
 
-# Adres tygodniowego raportu CFTC
-URL = "https://www.cftc.gov/dea/newcot/FinFutWk.txt"
-# Nazwa pliku wyjściowego z historią
+# URL pobierający aktualny raport TFF w formacie CSV.
+# Serwis publicreporting.cftc.gov udostępnia gotowe tabele w formacie CSV.
+CSV_URL = (
+    "https://publicreporting.cftc.gov/api/v1/aggregation/tff?"
+    "format=csv&commodity=all"
+)
+
+# plik wyjściowy
 OUT = "cot_history.csv"
 
-# Mapowanie nazw rynków CFTC -> symbol instrumentu
+# mapowanie nazw rynków (fragment nazwy rynku w raporcie) na symbol instrumentu
 MAP = {
     "EURO FX": "EURUSD",
     "BRITISH POUND": "GBPUSD",
@@ -18,59 +23,53 @@ MAP = {
     "RUSSELL 2000": "US2000",
 }
 
-def parse_weekly(txt: str) -> pd.DataFrame:
+def fetch_tff_csv() -> pd.DataFrame:
     """
-    Parsuje treść raportu FinFutWk.txt i zwraca DataFrame z kolumnami
-    ['date', 'symbol', 'lev_funds_net'].
+    Pobierz CSV z API CFTC i zwróć ramkę danych.
+    W nagłówku zapytania ustawiamy User-Agent, żeby uniknąć 403.
     """
-    lines = txt.splitlines()
-    # Określ datę raportu (np. 08/06/24) z pierwszych kilkunastu linii
-    week_date = None
-    for L in lines[:20]:
-        m = re.search(r"(\d{2})/(\d{2})/(\d{2})", L)
-        if m:
-            mm, dd, yy = m.groups()
-            week_date = f"20{yy}-{mm}-{dd}"
-            break
-    if not week_date:
-        # Fallback: użyj ostatniego wtorku
-        today = dt.date.today()
-        week_date = (today - dt.timedelta(days=(today.weekday() - 1) % 7)).isoformat()
+    resp = requests.get(CSV_URL, headers={"User-Agent": "Mozilla/5.0"}, timeout=60)
+    resp.raise_for_status()
+    # Użyj io.StringIO, żeby przekazać tekst CSV do pandas
+    return pd.read_csv(io.StringIO(resp.text))
 
-    current_market = None
+def extract_records(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Z oryginalnego CSV wybierz rynki z MAP i oblicz lev_funds_net = long − short.
+    Załóż, że kolumny nazywają się:
+      - Report_Date – data raportu (format YYYY-MM-DD)
+      - Market_and_Exchange_Name – nazwa rynku
+      - Leveraged_Money_Long_All – pozycje długie leveraged funds
+      - Leveraged_Money_Short_All – pozycje krótkie leveraged funds
+    Jeśli w Twoim pliku kolumny nazywają się inaczej, zmień nazwy tutaj.
+    """
     records = []
-    for raw in lines:
-        up = raw.strip().upper()
-        # Wykryj początek bloku rynku
-        for mk, sym in MAP.items():
-            if mk in up:  # zamiast up.startswith(mk)
-                current_market = sym
-        # Szukaj wiersza z danymi "Leveraged Funds" (lub skrótu "Lev Funds")
-        if current_market and ("LEVERAGED FUNDS" in up or "LEV FUNDS" in up):
-            # Wyciągnij wszystkie liczby (mogą mieć przecinki i minusy)
-            nums = [int(n.replace(",", "")) for n in re.findall(r"-?\d[\d,]*", up)]
-            # Netto = long – short, jeśli mamy ≥2 liczby; w przeciwnym razie weź ostatnią liczbę
-            net = None
-            if len(nums) >= 2:
-                net = nums[0] - nums[1]
-            elif nums:
-                net = nums[-1]
-            if net is not None:
-                records.append({
-                    "date": week_date,
-                    "symbol": current_market,
-                    "lev_funds_net": int(net)
-                })
-            current_market = None  # Zamknij blok rynku
-    # Zwróć DataFrame z kolumnami nawet gdy brak wierszy
+    for key_fragment, symbol in MAP.items():
+        # filtrowanie wierszy, w których nazwa rynku zawiera dany fragment
+        mdf = df[df["Market_and_Exchange_Name"].str.contains(key_fragment, case=False, na=False)]
+        if mdf.empty:
+            continue
+        # weź najnowszą datę (pliki zawierają historię wielu raportów)
+        latest_row = mdf.sort_values("Report_Date").iloc[-1]
+        date_str = latest_row["Report_Date"]
+        # oblicz netto
+        long_pos = latest_row["Leveraged_Money_Long_All"]
+        short_pos = latest_row["Leveraged_Money_Short_All"]
+        net = long_pos - short_pos
+        records.append({"date": date_str, "symbol": symbol, "lev_funds_net": int(net)})
     return pd.DataFrame(records, columns=["date", "symbol", "lev_funds_net"])
 
 def main():
-    # Pobierz treść pliku z nagłówkiem User-Agent (inaczej może być 403)
-    resp = requests.get(URL, headers={"User-Agent": "Mozilla/5.0"}, timeout=40)
-    resp.raise_for_status()
-    df_new = parse_weekly(resp.text)
-    # Wczytaj istniejący plik historii (jeśli istnieje)
+    try:
+        df_csv = fetch_tff_csv()
+    except Exception as e:
+        print(f"Unable to fetch CSV: {e}")
+        return
+    records_df = extract_records(df_csv)
+    if records_df.empty:
+        print("No records extracted from CSV. Please check column names and MAP.")
+        return
+    # wczytaj istniejącą historię, jeżeli plik istnieje
     if os.path.exists(OUT):
         try:
             df_old = pd.read_csv(OUT)
@@ -78,13 +77,12 @@ def main():
             df_old = pd.DataFrame(columns=["date", "symbol", "lev_funds_net"])
     else:
         df_old = pd.DataFrame(columns=["date", "symbol", "lev_funds_net"])
-    # Sklej starą i nową historię, usuń duplikaty, posortuj
-    df = pd.concat([df_old, df_new], ignore_index=True)
-    if not df.empty:
-        df["date"] = pd.to_datetime(df["date"]).dt.date
-        df = df.drop_duplicates(subset=["date", "symbol"]).sort_values(["symbol", "date"])
-    df.to_csv(OUT, index=False)
-    print(f"Saved {OUT} rows: {len(df)}")
+    df_all = pd.concat([df_old, records_df], ignore_index=True)
+    # deduplikacja i sortowanie
+    df_all["date"] = pd.to_datetime(df_all["date"]).dt.date
+    df_all = df_all.drop_duplicates(subset=["date", "symbol"]).sort_values(["symbol", "date"])
+    df_all.to_csv(OUT, index=False)
+    print(f"Saved {OUT} rows: {len(df_all)}")
 
 if __name__ == "__main__":
     main()
