@@ -12,10 +12,10 @@ OUT = "cot_history.csv"
 # Mapowanie nazw rynków CFTC -> symbol instrumentu
 MAP = {
     "EURO FX": "EURUSD",
-    "BRITISH POUND STERLING": "GBPUSD",
+    "BRITISH POUND": "GBPUSD",
     "AUSTRALIAN DOLLAR": "AUDUSD",
-    "E-MINI S&P 500": "US500",
-    "RUSSELL 2000 MINI": "US2000",
+    "S&P 500": "US500",
+    "RUSSELL 2000": "US2000",
 }
 
 def parse_weekly(txt: str) -> pd.DataFrame:
@@ -43,7 +43,7 @@ def parse_weekly(txt: str) -> pd.DataFrame:
         up = raw.strip().upper()
         # Wykryj początek bloku rynku
         for mk, sym in MAP.items():
-            if up.startswith(mk):
+            if mk in up:  # zamiast up.startswith(mk)
                 current_market = sym
         # Szukaj wiersza z danymi "Leveraged Funds" (lub skrótu "Lev Funds")
         if current_market and ("LEVERAGED FUNDS" in up or "LEV FUNDS" in up):
