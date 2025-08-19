@@ -9,8 +9,8 @@ MAP = {
     "EURO FX": "EURUSD",
     "BRITISH POUND": "GBPUSD",
     "AUSTRALIAN DOLLAR": "AUDUSD",
-    "S&P 500": "US500",
-    "RUSSELL 2000": "US2000",
+    "E-MINI S&P 500": "US500",
+    "RUSSELL E-MINI": "US2000",
 }
 
 def get_latest_net(fragment, symbol):
